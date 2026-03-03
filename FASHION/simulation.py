@@ -8,13 +8,14 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 # -----------------------------
 # Config
 # -----------------------------
-ROW_BANDS   = 7      # 28x28 -> 7 x ROW_BANDS
+ROW_BANDS   = 10      # 28x28 -> 7 x ROW_BANDS
 K_VIRTUAL   = 1       # 1 = no masks; >1 = 1 baseline + (K-1) ±1 masks
 MASK_SEED   = 42
 TEST_SIZE   = 0.3
 SEED        = 42
-N_PER_CLASS = 150    
-
+N_PER_CLASS = 1500    
+FASHION_CLASSES = ['T-shirt/top','Trouser','Pullover','Dress','Coat',
+                   'Sandal','Shirt','Sneaker','Bag','Ankle boot']
 # -----------------------------
 # Helpers
 # -----------------------------
@@ -107,14 +108,53 @@ def main():
         X_masked, yb, test_size=TEST_SIZE, stratify=yb, random_state=SEED
     )
 
-    # Scale
-    scaler = StandardScaler()
-    X_train = scaler.fit_transform(X_train)
-    X_test  = scaler.transform(X_test)
+    # -----------------------------
+    # VISUALIZATION BLOCK
+    # -----------------------------
     import matplotlib.pyplot as plt
-    plt.imshow(X.reshape(-1,28,28)[0], cmap='gray')
-    plt.title(f"Label = {y[0]}")
-    plt.show()
+    
+    def visualize_encoding(original, row_bands, label):
+        """Plots the original 28x28 and the downsampled simulator input side-by-side."""
+        
+        # 1. Calculate the Downsampled version
+        processed = downsample_to_7xM(original, row_bands)
+        
+        # 2. Setup Plot
+        fig, axes = plt.subplots(1, 2, figsize=(10, 5))
+        
+        # Plot A: Original
+        im1 = axes[0].imshow(original, cmap='gray', vmin=0, vmax=1)
+        axes[0].set_title(f"Original (28x28)\nLabel: {label}")
+        axes[0].axis('off')
+        
+        # Plot B: Downsampled (What the hardware sees)
+        # interpolation='nearest' prevents Matplotlib from blurring the pixels
+        # aspect='auto' stretches the 4x7 or 7x7 grid to fill the square box
+        im2 = axes[1].imshow(processed, cmap='gray', vmin=0, vmax=1, 
+                             interpolation='nearest', aspect='auto')
+        
+        axes[1].set_title(f"Hardware Input ({row_bands}x7)\n(Heater Voltages)")
+        
+        # Add values on top of the grid (Optional, good for debugging)
+        if row_bands <= 14:
+            for i in range(processed.shape[0]):
+                for j in range(processed.shape[1]):
+                    val = processed[i, j]
+                    color = "black" if val > 0.5 else "white"
+                    axes[1].text(j, i, f"{val:.1f}", ha="center", va="center", 
+                                 color=color, fontsize=8)
+
+        plt.tight_layout()
+        plt.show()
+
+    # --- Pick a sample and show it ---
+    # Let's find a non-empty image (e.g., index 0)
+    sample_idx = 0
+    sample_img = Xb[sample_idx].reshape(28, 28)
+    sample_label = FASHION_CLASSES[yb[sample_idx]] if 'FASHION_CLASSES' in globals() else yb[sample_idx]
+
+    print(f"Visualizing downsampling with ROW_BANDS = {ROW_BANDS}...")
+    visualize_encoding(sample_img, ROW_BANDS, sample_label)
 
     results = {}
 

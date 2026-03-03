@@ -1,3 +1,4 @@
+#  USING MORE INPUT HEATERS
 import os
 import time
 from datetime import datetime
@@ -8,7 +9,7 @@ from sklearn.metrics import accuracy_score, classification_report, confusion_mat
 from sklearn.model_selection import GridSearchCV, cross_val_score, train_test_split
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
-from Lib.scope import RigolDualScopes
+from Lib.scope import Rigol_Scopes
 from Lib.DualBoard import DualAD5380Controller
 from Lib.laser import LaserSource
 import matplotlib.pyplot as plt
@@ -16,13 +17,15 @@ from sklearn.linear_model import LinearRegression, RidgeClassifierCV
 
 SCOPE1_CHANNELS = [1, 2, 3, 4]   # first scope (4 channels)
 SCOPE2_CHANNELS = [1, 2, 3]      # second scope (3 channels)
-INPUT_HEATERS = [28, 29, 30, 31, 32, 33, 34]
-ALL_HEATERS = list(range(35))  # Omitting the second part of C
+
+INPUT_HEATERS = list(range(21, 35)) # Using heaters 21 through 34 (Total: 14)
+ALL_HEATERS = list(range(49))       # Maximum available heaters (0 to 48)
+
+ROW_BANDS = 7  # 14 heaters * 7 bands = 98 features
+
 V_MIN, V_MAX = 0.10, 4.90
 V_BIAS_INPUT = 2.5
 LASER_ADDRESS = "GPIB0::6::INSTR"
-ROW_BANDS = 14 # How many 7-wide row bands to use 
-K_VIRTUAL = 1          # Still use virtual nodes for feature diversity
 FASHION_CLASSES = ['T-shirt/top','Trouser','Pullover','Dress','Coat',
                    'Sandal','Shirt','Sneaker','Bag','Ankle boot']
 
@@ -31,19 +34,13 @@ READ_AVG = 1             # Fewer averages needed
 SPATIAL_GAIN = 0.4     # How strongly pixels drive heaters
 LOAD_PATH = 'none*.npz'
 # Dataset parameters
-N_SAMPLES_PER_DIGIT = 150 # Samples per digit class (500 total for quick demo)
+N_SAMPLES_PER_DIGIT = 50 # Samples per digit class (500 total for quick demo)
 TEST_FRACTION = 0.3      # % for testing
 
 
-WAVELENGTHS = [1548.0, 1552.0]  # or however many you want
+WAVELENGTHS = [1548.0, 1550.0, 1552.0]  # or however many you want
 
-#
 def select_images_for_missing(X_pool, y_pool, missing_per_class, seed=42):
-    """
-    From a candidate pool (X_pool, y_pool), pick exactly the number of
-    additional samples required per class (given by missing_per_class).
-    Returns X_new, y_new.
-    """
     rng = np.random.default_rng(seed)
 
     # We'll iterate in random order to avoid always picking the same ones
@@ -140,16 +137,6 @@ def per_class_counts(y, n_classes=10):
         for c in range(n_classes):
             counts[c] = int(np.sum(y == c))
     return counts
-      
-def hadamard_like_masks(n_masks, width=7, seed=0):
-    rng = np.random.default_rng(seed)
-    M = []
-    while len(M) < n_masks:
-        v = rng.choice([-1.0, 1.0], size=width)
-        # accept only if nearly orthogonal to existing ones
-        if all(abs(np.dot(v, m)/width) < 0.2 for m in M):
-            M.append(v)
-    return np.array(M)
 
 def downsample_to_7xM(img2d: np.ndarray, M: int) -> np.ndarray:
     assert img2d.shape == (28, 28)
@@ -159,6 +146,16 @@ def downsample_to_7xM(img2d: np.ndarray, M: int) -> np.ndarray:
     bands = np.array_split(col_reduced, M, axis=0)     # list of (rows_i, 7)
     out = np.stack([b.mean(axis=0) for b in bands], axis=0)  # (M, 7)
     return out
+
+def downsample_to_NxM(img2d: np.ndarray, M: int, N: int) -> np.ndarray:
+    assert img2d.shape == (28, 28)
+    # columns: 28 -> N (matches your number of heaters)
+    col_reduced = img2d.reshape(28, N, 28 // N).mean(axis=2)  
+    # rows: 28 -> M bands
+    bands = np.array_split(col_reduced, M, axis=0) 
+    out = np.stack([b.mean(axis=0) for b in bands], axis=0)  
+    return out
+
 
 
 def load_mnist_pool(max_per_class=400):
@@ -173,8 +170,11 @@ def load_mnist_pool(max_per_class=400):
     X_resized = []
     for img in X:
         img_2d = img.reshape(28, 28)
-        grid7xM = downsample_to_7xM(img_2d, ROW_BANDS)   # (ROW_BANDS × 7)
-        X_resized.append(grid7xM.flatten())
+        #grid7xM = downsample_to_7xM(img_2d, ROW_BANDS)   # (ROW_BANDS × 7)
+        # Then, update the call inside load_mnist_pool:
+        gridNxM = downsample_to_NxM(img_2d, ROW_BANDS, len(INPUT_HEATERS))
+
+        X_resized.append(gridNxM.flatten())
 
     X_resized = np.asarray(X_resized)
 
@@ -243,55 +243,18 @@ class PhotonicReservoir:
     def __init__(self, input_heaters, all_heaters):
         self.input_heaters = list(input_heaters)
         self.internal_heaters = [h for h in all_heaters if h not in self.input_heaters]
-        self.scope = RigolDualScopes(SCOPE1_CHANNELS, SCOPE2_CHANNELS,
+        self.scope = Rigol_Scopes(SCOPE1_CHANNELS, SCOPE2_CHANNELS,
                                      serial_scope1='HDO1B244000779')
         self.bus = DualAD5380Controller()
-
-        # NEW: laser handle
         self.laser = LaserSource(LASER_ADDRESS, timeout_ms=5000,
                                  write_termination="", read_termination="")
 
-        # # --- your existing mesh_bias, input_bias, baseline code here ---
         rng = np.random.default_rng(40)
         self.mesh_bias = {
             h: float(rng.uniform(0.5, 4.5))
             for h in self.internal_heaters
         }
-
-
-        # non_linear = { 
-        #         "0": 4.202622623288022,
-        #         "1": 4.342763605135841,
-        #         "2": 3.098829001469486,
-        #         "3": 4.130521142259029,
-        #         "4": 3.001457261700803,
-        #         "5": 4.552619769400613,
-        #         "6": 2.436117075053776,
-        #         "7": 2.421557181706181,
-        #         "8": 1.1424261883464002,
-        #         "9": 2.9664336984042725,
-        #         "10": 4.053130393304921,
-        #         "11": 3.072196612654478,
-        #         "12": 2.370736535724698,
-        #         "13": 3.0569259837149856,
-        #         "14": 2.6701935879046763,
-        #         "15": 1.2111915958292376,
-        #         "16": 4.032639975768708,
-        #         "17": 2.3880453538074407,
-        #         "18": 4.491246582536434,
-        #         "19": 4.8221669700820495,
-        #         "20": 3.6029189509231334,
-        #         "21": 1.9799926280091045,
-        #         "22": 3.3384464322643486,
-        #         "23": 2.596296748885792,
-        #         "24": 1.1316601402043447,
-        #         "25": 3.6536980427074104,
-        #         "26": 4.426966155695784,
-        #         "27": 1.8462506378319095
-        # }
-        #non_linear_int = {int(k): float(v) for k, v in non_linear.items()}
-        #self.mesh_bias = {h: non_linear_int[h] for h in self.internal_heaters}
-        self.input_bias = {h: V_BIAS_INPUT for h in range(28, 35)}
+        self.input_bias = {h: V_BIAS_INPUT for h in self.input_heaters}
 
         baseline = ({**self.mesh_bias, **self.input_bias})
         chs = sorted(baseline.keys())
@@ -319,7 +282,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
         super().__init__(input_heaters, all_heaters)
 
     def process_spatial_pattern(self, image_pixels):
-        K_req   = int(K_VIRTUAL)
+
         readavg = int(READ_AVG)
         vmin    = float(V_MIN)
         vmax    = float(V_MAX)
@@ -336,18 +299,7 @@ class PhotonicReservoirMNIST(PhotonicReservoir):
         half_swing = 0.5 * (vmax - vmin)
         x_centered = (x - 0.5) * 2.0              # [-1, 1]
 
-        # ---- build mask matrix once (unified path) ----
-        # K_eff = 1 uses [ones] -> identical to "no mask" behavior (fast)
-        if K_req <= 1:
-            mask_matrix = np.ones((1, chunk_size), dtype=float)
-        else:
-            need = K_req - 1
-            assert len(self.mask) >= need, \
-                f"Need {need} micro masks, have {len(self.mask)}"
-            mask_matrix = np.vstack([
-                np.ones((1, chunk_size), dtype=float),             # baseline mask
-                np.asarray(self.mask[:need], dtype=float)   # +/-1 masks
-            ])
+        mask_matrix = np.ones((1, chunk_size), dtype=float)
 
         send = self.bus.set
         read_many = self.scope.read_many
@@ -569,7 +521,7 @@ def visualize_results(X_images, y_labels, classifier, X_test, y_test, results, *
     else:
         best_name, best_acc = key, float('nan')
 
-    K   = meta.get("K_VIRTUAL", "N/A")
+    K   = meta.get("", "N/A")
     bands = meta.get("ROW_BANDS", "N/A")
     nspd  = meta.get("N_SAMPLES_PER_DIGIT", "N/A")
     gain  = meta.get("SPATIAL_GAIN", "N/A")
@@ -730,7 +682,6 @@ def main_mnist_dual_wavelength():
         total_time = time.perf_counter() - t0
 
         meta = {
-            "K_VIRTUAL": K_VIRTUAL,
             "ROW_BANDS": ROW_BANDS,
             "N_SAMPLES_PER_DIGIT": N_SAMPLES_PER_DIGIT,
             "SPATIAL_GAIN": SPATIAL_GAIN,
